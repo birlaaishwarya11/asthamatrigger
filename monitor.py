@@ -461,6 +461,8 @@ class AsthmaAudioMonitor:
         self._confirm_samples = int(cfg.sample_rate * cfg.confirm_duration_s)
         # Debug: rolling buffer of last 2 VAD clips for multi-window comparison
         self._debug_deque: deque = deque(maxlen=2)
+        # Dashboard recording control flag (toggled via Firebase /controls/recording_active)
+        self._recording_active: bool = True
 
     def _commit(self, episode: Episode):
         too_short = episode.duration_s < self._cfg.min_episode_duration_s
@@ -510,6 +512,10 @@ class AsthmaAudioMonitor:
                 continue
 
             now = time.time()
+
+            if not self._recording_active:
+                continue
+
             clip = self._vad.feed(frame)
             if clip is None:
                 continue
@@ -597,6 +603,20 @@ class AsthmaAudioMonitor:
 
         log.info("Inference thread stopped")
 
+    def _control_loop(self):
+        """Polls Firebase every 5 s for dashboard recording_active flag."""
+        ref = firebase_db.reference("controls/recording_active")
+        while not self._stop_event.is_set():
+            try:
+                val = ref.get()
+                active = bool(val) if val is not None else True
+                if active != self._recording_active:
+                    self._recording_active = active
+                    log.info("Recording %s via dashboard", "RESUMED" if active else "PAUSED")
+            except Exception as exc:
+                log.debug("Control poll error: %s", exc)
+            self._stop_event.wait(5.0)
+
     def _flush_loop(self):
         """Closes stale open episodes every second."""
         while not self._stop_event.is_set():
@@ -613,7 +633,8 @@ class AsthmaAudioMonitor:
         signal.signal(signal.SIGTERM, _shutdown)
 
         for name, target in [("Inference", self._inference_loop),
-                              ("Flusher",   self._flush_loop)]:
+                              ("Flusher",   self._flush_loop),
+                              ("Control",   self._control_loop)]:
             threading.Thread(target=target, name=name, daemon=True).start()
 
         log.info(

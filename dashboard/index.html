@@ -1,0 +1,577 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Asthma Trigger Monitor</title>
+
+  <!-- ── Paste your Firebase web config here ── -->
+  <script>
+    const FIREBASE_CONFIG = {
+      apiKey:            "YOUR_API_KEY",
+      authDomain:        "YOUR_PROJECT_ID.firebaseapp.com",
+      databaseURL:       "https://YOUR_PROJECT_ID-default-rtdb.firebaseio.com",
+      projectId:         "YOUR_PROJECT_ID",
+      storageBucket:     "YOUR_PROJECT_ID.appspot.com",
+      messagingSenderId: "YOUR_SENDER_ID",
+      appId:             "YOUR_APP_ID",
+    };
+  </script>
+
+  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-database-compat.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:       #0f1117;
+      --surface:  #1a1d27;
+      --border:   #2a2d3a;
+      --text:     #e2e8f0;
+      --muted:    #64748b;
+      --green:    #22c55e;
+      --amber:    #f59e0b;
+      --red:      #ef4444;
+      --blue:     #3b82f6;
+      --purple:   #a855f7;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 14px;
+      min-height: 100vh;
+      padding: 20px;
+    }
+
+    /* ── Header ── */
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 24px;
+    }
+    header h1 { font-size: 20px; font-weight: 600; letter-spacing: -0.3px; }
+    header h1 span { color: var(--blue); }
+    #conn-badge {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    #conn-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--muted);
+      transition: background 0.3s;
+    }
+    #conn-dot.live { background: var(--green); }
+
+    /* ── Grid ── */
+    .grid-top {
+      display: grid;
+      grid-template-columns: 220px 1fr 1fr;
+      gap: 16px;
+      margin-bottom: 16px;
+    }
+    .grid-bottom {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+      margin-bottom: 16px;
+    }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 20px;
+    }
+    .card-title {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      color: var(--muted);
+      margin-bottom: 16px;
+    }
+
+    /* ── Control card ── */
+    #btn-record {
+      width: 100%;
+      padding: 12px;
+      border-radius: 8px;
+      border: none;
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s, transform 0.1s;
+      margin-top: 8px;
+    }
+    #btn-record:active { transform: scale(0.97); }
+    #btn-record.start { background: var(--green); color: #000; }
+    #btn-record.stop  { background: var(--red);   color: #fff; }
+
+    #rec-status {
+      font-size: 12px;
+      color: var(--muted);
+      margin-top: 10px;
+      text-align: center;
+    }
+    #rec-indicator {
+      display: inline-block;
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--muted);
+      margin-right: 5px;
+    }
+    #rec-indicator.active {
+      background: var(--red);
+      box-shadow: 0 0 6px var(--red);
+      animation: pulse 1.2s infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.4; }
+    }
+
+    /* ── Risk gauge ── */
+    .gauge-wrap {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+    }
+    .gauge-arc {
+      position: relative;
+      width: 130px;
+      height: 70px;
+      overflow: hidden;
+    }
+    .gauge-arc svg { width: 130px; height: 130px; }
+    #gauge-fill {
+      transition: stroke-dashoffset 0.6s ease, stroke 0.6s ease;
+    }
+    #risk-value {
+      font-size: 36px;
+      font-weight: 700;
+      line-height: 1;
+      transition: color 0.4s;
+    }
+    #risk-label {
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+    }
+    #risk-time { font-size: 11px; color: var(--muted); }
+
+    /* ── Environment card ── */
+    .env-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+    }
+    .env-item { text-align: center; }
+    .env-val {
+      font-size: 28px;
+      font-weight: 700;
+      line-height: 1.1;
+    }
+    .env-unit { font-size: 13px; color: var(--muted); }
+    .env-label { font-size: 11px; color: var(--muted); margin-top: 4px; }
+    .env-bar-wrap {
+      height: 3px;
+      background: var(--border);
+      border-radius: 2px;
+      margin-top: 6px;
+      overflow: hidden;
+    }
+    .env-bar { height: 100%; border-radius: 2px; transition: width 0.5s; }
+
+    /* ── Episodes list ── */
+    #episodes-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      max-height: 260px;
+      overflow-y: auto;
+    }
+    #episodes-list::-webkit-scrollbar { width: 4px; }
+    #episodes-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+    .ep-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 12px;
+      background: var(--bg);
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      animation: fadeIn 0.3s ease;
+    }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; } }
+    .ep-icon { font-size: 22px; }
+    .ep-info { flex: 1; }
+    .ep-label { font-weight: 600; font-size: 13px; text-transform: capitalize; }
+    .ep-meta { font-size: 11px; color: var(--muted); margin-top: 2px; }
+    .ep-conf {
+      font-size: 12px;
+      font-weight: 600;
+      padding: 3px 8px;
+      border-radius: 20px;
+      background: var(--border);
+    }
+    .ep-conf.high  { color: var(--red);   background: rgba(239,68,68,0.15); }
+    .ep-conf.med   { color: var(--amber); background: rgba(245,158,11,0.15); }
+    .ep-conf.low   { color: var(--green); background: rgba(34,197,94,0.15); }
+
+    /* ── Correlation chart ── */
+    #chart-wrap {
+      position: relative;
+      height: 220px;
+    }
+
+    /* ── Empty state ── */
+    .empty {
+      text-align: center;
+      color: var(--muted);
+      padding: 30px 0;
+      font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>Asthma <span>Trigger</span> Monitor</h1>
+  <div id="conn-badge">
+    <div id="conn-dot"></div>
+    <span id="conn-text">connecting…</span>
+  </div>
+</header>
+
+<!-- Row 1: Control | Risk Score | Environment -->
+<div class="grid-top">
+
+  <!-- Control -->
+  <div class="card">
+    <div class="card-title">Recording</div>
+    <button id="btn-record" class="start">▶ Start</button>
+    <p id="rec-status"><span id="rec-indicator"></span><span id="rec-status-text">Idle</span></p>
+  </div>
+
+  <!-- Risk Score -->
+  <div class="card">
+    <div class="card-title">Risk Score</div>
+    <div class="gauge-wrap">
+      <div class="gauge-arc">
+        <svg viewBox="0 0 130 130">
+          <!-- background arc -->
+          <path d="M 10 100 A 55 55 0 0 1 120 100"
+                fill="none" stroke="#2a2d3a" stroke-width="12"
+                stroke-linecap="round"/>
+          <!-- filled arc -->
+          <path id="gauge-fill"
+                d="M 10 100 A 55 55 0 0 1 120 100"
+                fill="none" stroke="#22c55e" stroke-width="12"
+                stroke-linecap="round"
+                stroke-dasharray="173"
+                stroke-dashoffset="173"/>
+        </svg>
+      </div>
+      <div id="risk-value" style="color: var(--green)">—</div>
+      <div id="risk-label" style="color: var(--green)">NO DATA</div>
+      <div id="risk-time" class="muted"></div>
+    </div>
+  </div>
+
+  <!-- Environment -->
+  <div class="card">
+    <div class="card-title">Environment — Live</div>
+    <div class="env-grid">
+      <div class="env-item">
+        <div class="env-val" id="env-gas">—</div>
+        <div class="env-unit">Ω</div>
+        <div class="env-label">Gas Resistance</div>
+        <div class="env-bar-wrap"><div class="env-bar" id="env-gas-bar" style="width:0%;background:var(--green)"></div></div>
+      </div>
+      <div class="env-item">
+        <div class="env-val" id="env-hum">—</div>
+        <div class="env-unit">%</div>
+        <div class="env-label">Humidity</div>
+        <div class="env-bar-wrap"><div class="env-bar" id="env-hum-bar" style="width:0%;background:var(--blue)"></div></div>
+      </div>
+      <div class="env-item">
+        <div class="env-val" id="env-temp">—</div>
+        <div class="env-unit">°C</div>
+        <div class="env-label">Temperature</div>
+        <div class="env-bar-wrap"><div class="env-bar" id="env-temp-bar" style="width:0%;background:var(--amber)"></div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Row 2: Episodes | Correlation -->
+<div class="grid-bottom">
+
+  <!-- Episodes -->
+  <div class="card">
+    <div class="card-title">Recent Episodes</div>
+    <div id="episodes-list"><div class="empty">No episodes yet</div></div>
+  </div>
+
+  <!-- Correlation chart -->
+  <div class="card">
+    <div class="card-title">Sensor vs Episodes — Last 2 Hours</div>
+    <div id="chart-wrap">
+      <canvas id="corr-chart"></canvas>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── Firebase init ────────────────────────────────────────────────────────────
+firebase.initializeApp(FIREBASE_CONFIG);
+const db = firebase.database();
+
+// ── Connection indicator ─────────────────────────────────────────────────────
+db.ref(".info/connected").on("value", snap => {
+  const live = snap.val() === true;
+  document.getElementById("conn-dot").className  = live ? "live" : "";
+  document.getElementById("conn-text").textContent = live ? "Live" : "Reconnecting…";
+});
+
+// ── Recording control ────────────────────────────────────────────────────────
+const recRef = db.ref("controls/recording_active");
+const btn    = document.getElementById("btn-record");
+const recInd = document.getElementById("rec-indicator");
+const recTxt = document.getElementById("rec-status-text");
+
+let recording = false;
+
+recRef.on("value", snap => {
+  recording = snap.val() === true;
+  btn.textContent = recording ? "⏹ Stop" : "▶ Start";
+  btn.className   = recording ? "stop" : "start";
+  recInd.className = recording ? "active" : "";
+  recTxt.textContent = recording ? "Recording" : "Idle";
+});
+
+btn.addEventListener("click", () => recRef.set(!recording));
+
+// ── Risk score gauge ─────────────────────────────────────────────────────────
+const ARC_LEN = 173; // full arc stroke-dasharray length
+
+function updateGauge(prob) {
+  const pct   = prob === null ? 0 : Math.min(Math.max(prob, 0), 1);
+  const color = pct >= 0.65 ? "var(--red)" : pct >= 0.40 ? "var(--amber)" : "var(--green)";
+  const label = pct >= 0.65 ? "HIGH RISK" : pct >= 0.40 ? "MODERATE" : "LOW RISK";
+  const offset = ARC_LEN - pct * ARC_LEN;
+
+  document.getElementById("gauge-fill").style.strokeDashoffset = offset;
+  document.getElementById("gauge-fill").style.stroke = color;
+  document.getElementById("risk-value").textContent  = prob === null ? "—" : Math.round(pct * 100) + "%";
+  document.getElementById("risk-value").style.color  = color;
+  document.getElementById("risk-label").textContent  = prob === null ? "NO DATA" : label;
+  document.getElementById("risk-label").style.color  = color;
+}
+
+db.ref("predictions").orderByChild("predicted_at_epoch").limitToLast(1)
+  .on("value", snap => {
+    const data = snap.val();
+    if (!data) { updateGauge(null); return; }
+    const latest = Object.values(data)[0];
+    updateGauge(latest.probability);
+    const ago = timeAgo(latest.predicted_at_epoch);
+    document.getElementById("risk-time").textContent = `Updated ${ago}`;
+  });
+
+// ── Environment live ─────────────────────────────────────────────────────────
+db.ref("sensor_readings").orderByChild("timestamp_epoch").limitToLast(1)
+  .on("value", snap => {
+    const data = snap.val();
+    if (!data) return;
+    const r = Object.values(data)[0];
+
+    // Gas: higher = better. Scale 0–60000 Ω. Color: low = red.
+    const gas  = Math.round(r.gas ?? 0);
+    const hum  = (r.humidity ?? 0).toFixed(1);
+    const temp = (r.temperature ?? 0).toFixed(1);
+
+    document.getElementById("env-gas").textContent  = gas >= 1000 ? (gas/1000).toFixed(1)+"k" : gas;
+    document.getElementById("env-hum").textContent  = hum;
+    document.getElementById("env-temp").textContent = temp;
+
+    const gasPct  = Math.min(gas / 60000 * 100, 100);
+    const humPct  = Math.min(r.humidity / 100 * 100, 100);
+    const tempPct = Math.min(Math.max((r.temperature - 15) / 25 * 100, 0), 100);
+
+    const gasColor = gasPct < 20 ? "var(--red)" : gasPct < 40 ? "var(--amber)" : "var(--green)";
+    document.getElementById("env-gas-bar").style.width      = gasPct + "%";
+    document.getElementById("env-gas-bar").style.background = gasColor;
+    document.getElementById("env-hum-bar").style.width      = humPct + "%";
+    document.getElementById("env-temp-bar").style.width     = tempPct + "%";
+  });
+
+// ── Episodes feed ────────────────────────────────────────────────────────────
+const ICONS = { cough: "😮‍💨", sneeze: "🤧", wheeze: "🫁" };
+
+db.ref("episodes").orderByChild("episode_start_epoch").limitToLast(20)
+  .on("value", snap => {
+    const data = snap.val();
+    const list = document.getElementById("episodes-list");
+    if (!data) { list.innerHTML = '<div class="empty">No episodes yet</div>'; return; }
+
+    const rows = Object.values(data)
+      .sort((a, b) => b.episode_start_epoch - a.episode_start_epoch);
+
+    list.innerHTML = rows.map(ep => {
+      const icon  = ICONS[ep.label] ?? "🔊";
+      const conf  = ep.peak_confidence ?? 0;
+      const confClass = conf >= 0.7 ? "high" : conf >= 0.4 ? "med" : "low";
+      const ago   = timeAgo(ep.episode_start_epoch);
+      const dur   = ep.duration_s?.toFixed(1) ?? "?";
+      const hits  = ep.detection_count ?? "?";
+      return `
+        <div class="ep-row">
+          <div class="ep-icon">${icon}</div>
+          <div class="ep-info">
+            <div class="ep-label">${ep.label}</div>
+            <div class="ep-meta">${ago} · ${dur}s · ${hits} hits</div>
+          </div>
+          <div class="ep-conf ${confClass}">${Math.round(conf * 100)}%</div>
+        </div>`;
+    }).join("");
+  });
+
+// ── Correlation chart ────────────────────────────────────────────────────────
+const ctx   = document.getElementById("corr-chart").getContext("2d");
+const TWO_H = 2 * 60 * 60;
+
+const corrChart = new Chart(ctx, {
+  type: "line",
+  data: {
+    datasets: [
+      {
+        label: "Gas Resistance (Ω)",
+        data: [],
+        borderColor: "#3b82f6",
+        backgroundColor: "rgba(59,130,246,0.08)",
+        fill: true,
+        tension: 0.3,
+        pointRadius: 0,
+        borderWidth: 2,
+        yAxisID: "yGas",
+      },
+      {
+        label: "Humidity (%)",
+        data: [],
+        borderColor: "#a855f7",
+        borderWidth: 1.5,
+        borderDash: [4, 3],
+        pointRadius: 0,
+        tension: 0.3,
+        yAxisID: "yHum",
+      },
+      {
+        label: "Episodes",
+        data: [],
+        type: "scatter",
+        pointStyle: "triangle",
+        pointRadius: 8,
+        pointHoverRadius: 10,
+        backgroundColor: "#ef4444",
+        yAxisID: "yGas",
+        showLine: false,
+      },
+    ],
+  },
+  options: {
+    animation: false,
+    responsive: true,
+    maintainAspectRatio: false,
+    interaction: { mode: "index", intersect: false },
+    scales: {
+      x: {
+        type: "linear",
+        ticks: {
+          color: "#64748b",
+          callback: v => {
+            const d = new Date(v * 1000);
+            return d.getHours().toString().padStart(2,"0") + ":" +
+                   d.getMinutes().toString().padStart(2,"0");
+          },
+          maxTicksLimit: 6,
+        },
+        grid: { color: "#2a2d3a" },
+      },
+      yGas: {
+        position: "left",
+        ticks: { color: "#3b82f6", callback: v => (v/1000).toFixed(0)+"k" },
+        grid: { color: "#2a2d3a" },
+        title: { display: true, text: "Gas (Ω)", color: "#3b82f6", font: { size: 11 } },
+      },
+      yHum: {
+        position: "right",
+        min: 0, max: 100,
+        ticks: { color: "#a855f7", callback: v => v+"%" },
+        grid: { drawOnChartArea: false },
+        title: { display: true, text: "Humidity", color: "#a855f7", font: { size: 11 } },
+      },
+    },
+    plugins: {
+      legend: { labels: { color: "#e2e8f0", boxWidth: 12, font: { size: 11 } } },
+      tooltip: {
+        backgroundColor: "#1a1d27",
+        borderColor: "#2a2d3a",
+        borderWidth: 1,
+        titleColor: "#e2e8f0",
+        bodyColor: "#94a3b8",
+      },
+    },
+  },
+});
+
+function refreshChart() {
+  const now    = Date.now() / 1000;
+  const cutoff = now - TWO_H;
+
+  db.ref("sensor_readings").orderByChild("timestamp_epoch").startAt(cutoff)
+    .once("value", snap => {
+      const data = snap.val() ?? {};
+      const rows = Object.values(data).sort((a, b) => a.timestamp_epoch - b.timestamp_epoch);
+
+      corrChart.data.datasets[0].data = rows.map(r => ({ x: r.timestamp_epoch, y: r.gas }));
+      corrChart.data.datasets[1].data = rows.map(r => ({ x: r.timestamp_epoch, y: r.humidity }));
+
+      db.ref("episodes").orderByChild("episode_start_epoch").startAt(cutoff)
+        .once("value", snap2 => {
+          const eps = snap2.val() ?? {};
+          // Plot episodes at the gas value at that timestamp (or midpoint of gas range)
+          const gasMax = Math.max(...rows.map(r => r.gas), 1);
+          corrChart.data.datasets[2].data = Object.values(eps).map(ep => ({
+            x: ep.episode_start_epoch,
+            y: gasMax * 0.92,   // plot near top so markers are visible
+            label: ep.label,
+          }));
+          corrChart.update("none");
+        });
+    });
+}
+
+refreshChart();
+setInterval(refreshChart, 30_000);  // refresh chart every 30 s
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+function timeAgo(epoch) {
+  const s = Math.floor(Date.now() / 1000 - epoch);
+  if (s <  60) return `${s}s ago`;
+  if (s < 3600) return `${Math.floor(s/60)}m ago`;
+  return `${Math.floor(s/3600)}h ago`;
+}
+</script>
+</body>
+</html>
