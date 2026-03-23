@@ -1,0 +1,24 @@
+# Firebase credentials — NEVER commit
+serviceAccountKey.json
+*.json.key
+
+# Local config (contains database URL) — use *.template.json instead
+config.json
+predictor_config.json
+
+# Python
+venv/
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Models
+*.joblib
+*.pkl
+
+# OS
+.DS_Store

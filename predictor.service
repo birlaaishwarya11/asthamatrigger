@@ -1,0 +1,14 @@
+[Unit]
+Description=Asthma Trigger ML Predictor
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/asthma_monitor
+ExecStart=/opt/asthma_monitor/.venv/bin/python predictor.py --config predictor_config.json
+Restart=on-failure
+RestartSec=30
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
