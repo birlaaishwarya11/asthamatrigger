@@ -55,10 +55,11 @@ while True:
         "gas": gas,
         "humidity": humidity,
         "temperature": temp,
-        "risk_level": risk
+        "risk_level": risk,
+        "timestamp_epoch": time.time(),
     }
     try:
-        requests.patch(FIREBASE_URL + "/sensors.json", json=data)
+        requests.patch(FIREBASE_URL + "/sensor_readings.json", json=data)
         print("Sent to Firebase! Risk:", risk)
     except Exception as e:
         print("Firebase error:", e)

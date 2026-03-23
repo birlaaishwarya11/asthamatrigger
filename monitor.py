@@ -37,7 +37,6 @@ import signal
 import sys
 import threading
 import time
-from abc import ABC, abstractmethod
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from typing import Optional
@@ -260,9 +259,6 @@ class EpisodeTracker:
                 existing.last_epoch = now
                 existing.detection_count += 1
                 existing.peak_confidence = max(existing.peak_confidence, confidence)
-                log.debug("Episode EXTENDED label=%-10s  conf=%.2f  hits=%d  gap=%.1fs",
-                          label, confidence, existing.detection_count,
-                          now - existing.start_epoch)
             else:
                 # Gap exceeded → close old, open new
                 log.info("Episode GAP      label=%-10s  gap=%.1fs > %.1fs — closing",
@@ -356,11 +352,6 @@ class VotingBuffer:
             self._hits[label] = hits
             return len(hits) >= self._min_votes
 
-    def count(self, label: str, now: float) -> int:
-        """Current vote count within window (for logging)."""
-        with self._lock:
-            return sum(1 for t in self._hits.get(label, []) if now - t <= self._window_s)
-
     def reset(self, label: str) -> None:
         """Clear votes for label after a canonical detection fires."""
         with self._lock:
@@ -368,15 +359,9 @@ class VotingBuffer:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Classifier interface  ← swap this for a Weill Cornell REST API call
+# Classifier
 # ─────────────────────────────────────────────────────────────────────────────
-class AudioClassifier(ABC):
-    @abstractmethod
-    def classify(self, audio: np.ndarray, threshold: float) -> list[tuple[str, float]]:
-        ...
-
-
-class YAMNetClassifier(AudioClassifier):
+class YAMNetClassifier:
     MODEL_URL = "https://tfhub.dev/google/yamnet/1"
 
     def __init__(self):
@@ -436,8 +421,6 @@ class VAD:
     def feed(self, frame: np.ndarray) -> Optional[np.ndarray]:
         rms = float(np.sqrt(np.mean(frame ** 2)))
         if rms > self._threshold:
-            if not self._triggered:
-                log.debug("[VAD] triggered  rms=%.4f > threshold=%.4f", rms, self._threshold)
             self._triggered    = True
             self._hold_counter = self._hold
 
@@ -453,7 +436,6 @@ class VAD:
                     clip = np.pad(clip, (0, self._clip_samples - len(clip)))
                 else:
                     clip = clip[: self._clip_samples]
-                log.debug("[VAD] clip ready  samples=%d → sending to classifier", len(clip))
                 return clip
         return None
 
@@ -462,7 +444,7 @@ class VAD:
 # Main monitor daemon
 # ─────────────────────────────────────────────────────────────────────────────
 class AsthmaAudioMonitor:
-    def __init__(self, cfg: Config, classifier: AudioClassifier, writer: FirebaseWriter,
+    def __init__(self, cfg: Config, classifier: YAMNetClassifier, writer: FirebaseWriter,
                  debug_audio: bool = False):
         self._cfg         = cfg
         self._classifier  = classifier
@@ -519,12 +501,7 @@ class AsthmaAudioMonitor:
             log.warning("Audio queue full — frame dropped")
 
     def _inference_loop(self):
-        log.info("Inference thread started")
         target_lower = {c.lower() for c in self._cfg.target_classes}
-        _heartbeat_interval = 5.0
-        _last_heartbeat = time.time()
-        _frame_count = 0
-        _max_rms = 0.0
 
         while not self._stop_event.is_set():
             try:
@@ -532,24 +509,7 @@ class AsthmaAudioMonitor:
             except queue.Empty:
                 continue
 
-            _frame_count += 1
-            rms = float(np.sqrt(np.mean(frame ** 2)))
-            _max_rms = max(_max_rms, rms)
             now = time.time()
-            if now - _last_heartbeat >= _heartbeat_interval:
-                bar_len = 20
-                filled = int(min(_max_rms / self._cfg.vad_energy_threshold, 1.0) * bar_len)
-                bar = "█" * filled + "░" * (bar_len - filled)
-                status = "LOUD ENOUGH" if _max_rms >= self._cfg.vad_energy_threshold else "too quiet "
-                log.debug(
-                    "[Heartbeat] mic=[%s] peak=%.4f  threshold=%.4f  %-11s  frames=%d  queue=%d",
-                    bar, _max_rms, self._cfg.vad_energy_threshold, status,
-                    _frame_count, self._audio_q.qsize(),
-                )
-                _frame_count = 0
-                _max_rms = 0.0
-                _last_heartbeat = now
-
             clip = self._vad.feed(frame)
             if clip is None:
                 continue
@@ -567,12 +527,11 @@ class AsthmaAudioMonitor:
                                  if _ALIAS_MAP.get(lbl.lower(), lbl.lower()) == canon]
                     if confirmed:
                         best_lbl, best_sc = max(confirmed, key=lambda x: x[1])
-                        log.info("[Confirm] %-8s  ✓ long-clip confirms  conf=%.2f  (%.1fs window)  via %s",
-                                 canon, best_sc, self._cfg.confirm_duration_s, best_lbl)
+                        log.debug("[Confirm] %-8s  ✓ conf=%.2f  via %s",
+                                  canon, best_sc, best_lbl)
                     else:
                         top = ", ".join(f"{lbl}({sc:.2f})" for lbl, sc in long_results[:3])
-                        log.info("[Confirm] %-8s  ✗ long-clip did NOT confirm  top=%s",
-                                 canon, top or "none")
+                        log.debug("[Confirm] %-8s  ✗ top=%s", canon, top or "none")
 
             if self._debug_audio:
                 self._debug_deque.append(clip)
@@ -601,18 +560,6 @@ class AsthmaAudioMonitor:
             else:
                 results = self._classifier.classify(clip, self._cfg.confidence_threshold)
 
-            if not results:
-                log.debug("[Classifier] no results above conf=%.2f", self._cfg.confidence_threshold)
-            else:
-                top_labels = ", ".join(f"{lbl}({sc:.2f})" for lbl, sc in results[:5])
-                matched = [lbl for lbl, _ in results if lbl.lower() in target_lower]
-                if matched:
-                    log.debug("[Classifier] %d result(s) — TOP: %s  ← MATCH: %s",
-                              len(results), top_labels, ", ".join(matched))
-                else:
-                    log.debug("[Classifier] %d result(s) — TOP: %s  (no target match)",
-                              len(results), top_labels)
-
             for label, confidence in results:
                 label_lower = label.lower()
                 if label_lower not in target_lower:
@@ -621,32 +568,24 @@ class AsthmaAudioMonitor:
                 # Resolve to canonical label (coughing→cough, sneezing→sneeze, etc.)
                 canonical = _ALIAS_MAP.get(label_lower, label_lower)
 
-                log.info("[Detection] %-16s  conf=%.2f  canonical=%s",
-                         label.upper(), confidence, canonical)
+                log.debug("[Detection] %-16s  conf=%.2f  canonical=%s",
+                          label.upper(), confidence, canonical)
 
                 # Adjacent labels (breathing, gasp, etc.) that don't map to a canonical
                 # are noted but do not feed the episode tracker.
                 if canonical not in CANONICAL_LABELS:
-                    log.debug("[Voting] adjacent label %-16s — noted, not canonical", label_lower)
                     continue
 
                 vote_hit = self._voting.add(canonical, now)
-                votes = self._voting.count(canonical, now)
                 if not vote_hit:
-                    log.debug("[Voting] %-8s  votes=%d/%d  (waiting for threshold)",
-                              canonical, votes, self._cfg.min_votes)
                     continue
 
-                log.info("[Voting] %-8s  votes=%d/%d  ✓ threshold met — committing",
-                         canonical, votes, self._cfg.min_votes)
+                log.info("[Voting] %-8s  ✓ confirmed — committing", canonical)
                 self._voting.reset(canonical)
 
                 # Start confirmation buffer if not already running for this label.
-                # Seeds it with the 1s clip that just triggered detection.
                 if canonical not in self._confirm_clips:
                     self._confirm_clips[canonical] = [clip]
-                    log.debug("[Confirm] %-8s  started long-clip buffer (target=%.1fs)",
-                              canonical, self._cfg.confirm_duration_s)
 
                 closed = self._tracker.feed(
                     label=canonical,
@@ -714,7 +653,6 @@ class AsthmaAudioMonitor:
 def main():
     p = argparse.ArgumentParser(description="Indoor Asthma Trigger — Audio Monitor")
     p.add_argument("--config",       default=None)
-    p.add_argument("--classifier",   choices=["yamnet"], default="yamnet")
     p.add_argument("--list-devices", action="store_true")
     p.add_argument("--debug-audio",  action="store_true",
                    help="Print top-5 YAMNet scores on every clip for diagnosis")

@@ -62,12 +62,11 @@ import argparse
 import json
 import logging
 import os
-import pickle
 import sys
 import threading
 import time
-from dataclasses import dataclass, field, asdict
-from datetime import datetime, timezone, timedelta
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -190,11 +189,9 @@ class FirebaseClient:
 # Feature engineering
 # ─────────────────────────────────────────────────────────────────────────────
 FEATURE_COLS = [
-    "voc_mean", "voc_max", "voc_std",
-    "iaq_mean", "iaq_max",
+    "gas_mean", "gas_max", "gas_std",
     "humidity_mean", "humidity_min",
     "temp_mean", "temp_deviation",      # deviation from 21°C comfort baseline
-    "change_rate_mean", "change_rate_max",
     "reading_density",                  # readings per minute in the window
     "hour_sin", "hour_cos",             # circadian encoding
     "day_of_week_sin", "day_of_week_cos",
@@ -220,24 +217,20 @@ def build_feature_vector(window: pd.DataFrame, at_epoch: float) -> Optional[dict
     Summarize a window of sensor readings into a single feature vector dict.
     Returns None if the window is empty or missing required columns.
     """
-    required = {"voc_ppb", "iaq", "temp_c", "humidity_pct"}
+    required = {"gas", "temperature", "humidity"}
     if window.empty or not required.issubset(window.columns):
         return None
 
     duration_min = (window["timestamp_epoch"].max() - window["timestamp_epoch"].min()) / 60.0 + 1e-6
 
     feats = {
-        "voc_mean":          window["voc_ppb"].mean(),
-        "voc_max":           window["voc_ppb"].max(),
-        "voc_std":           window["voc_ppb"].std(ddof=0),
-        "iaq_mean":          window["iaq"].mean(),
-        "iaq_max":           window["iaq"].max(),
-        "humidity_mean":     window["humidity_pct"].mean(),
-        "humidity_min":      window["humidity_pct"].min(),
-        "temp_mean":         window["temp_c"].mean(),
-        "temp_deviation":    abs(window["temp_c"].mean() - COMFORT_TEMP),
-        "change_rate_mean":  window["voc_change_rate"].mean() if "voc_change_rate" in window.columns else 0.0,
-        "change_rate_max":   window["voc_change_rate"].max()  if "voc_change_rate" in window.columns else 0.0,
+        "gas_mean":          window["gas"].mean(),
+        "gas_max":           window["gas"].max(),
+        "gas_std":           window["gas"].std(ddof=0),
+        "humidity_mean":     window["humidity"].mean(),
+        "humidity_min":      window["humidity"].min(),
+        "temp_mean":         window["temperature"].mean(),
+        "temp_deviation":    abs(window["temperature"].mean() - COMFORT_TEMP),
         "reading_density":   len(window) / duration_min,
     }
     feats.update(_circadian_features(at_epoch))
@@ -247,14 +240,11 @@ def build_feature_vector(window: pd.DataFrame, at_epoch: float) -> Optional[dict
 def threshold_breaches(feats: dict) -> list[str]:
     """Return human-readable names for any threshold crossings in the feature vector."""
     hits = []
-    if feats.get("voc_max", 0)      >= 1000: hits.append("voc_high")
-    elif feats.get("voc_max", 0)    >= 500:  hits.append("voc_moderate")
-    if feats.get("iaq_max", 0)      >= 200:  hits.append("iaq_unhealthy")
-    elif feats.get("iaq_max", 0)    >= 150:  hits.append("iaq_poor")
+    # BME680: lower gas resistance = worse air quality
+    if feats.get("gas_min", feats.get("gas_mean", 99999)) < 5000:   hits.append("gas_very_poor")
+    elif feats.get("gas_min", feats.get("gas_mean", 99999)) < 10000: hits.append("gas_poor")
     if feats.get("humidity_min", 100) < 30:  hits.append("humidity_very_dry")
     elif feats.get("humidity_min", 100) < 40: hits.append("humidity_dry")
-    if feats.get("change_rate_max", 0) >= 200: hits.append("voc_spike_strong")
-    elif feats.get("change_rate_max", 0) >= 50: hits.append("voc_spike_moderate")
     return hits
 
 
@@ -613,13 +603,72 @@ class PredictionServer:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Mock sensor generator
+# ─────────────────────────────────────────────────────────────────────────────
+def generate_mock_sensors(days: int = 4, interval_s: int = 30) -> pd.DataFrame:
+    """
+    Generate realistic BME680 sensor readings over the past `days` days.
+    Readings are spaced `interval_s` seconds apart.
+    No data is written to Firebase.
+    """
+    rng = np.random.default_rng(42)
+    now = time.time()
+    timestamps = np.arange(now - days * 86400, now, interval_s)
+    n = len(timestamps)
+
+    rows = []
+    for ts in timestamps:
+        rows.append({
+            "timestamp_epoch": float(ts),
+            "gas":             float(np.clip(rng.normal(30000, 8000), 5000, 60000)),
+            "humidity":        float(np.clip(rng.normal(50, 8), 20, 90)),
+            "temperature":     float(np.clip(rng.normal(22, 2), 15, 35)),
+        })
+
+    df = pd.DataFrame(rows).sort_values("timestamp_epoch").reset_index(drop=True)
+    log.info("Mock sensors: %d readings over %d days", len(df), days)
+    return df
+
+
+def generate_mock_episodes(days: int = 4, count: int = 20) -> pd.DataFrame:
+    """
+    Generate fake episode records spread over the past `days` days.
+    Merges with real Firebase episodes — call pd.concat() on the result.
+    """
+    rng = np.random.default_rng(7)
+    now = time.time()
+    labels = ["cough", "sneeze", "wheeze"]
+    rows = []
+    for _ in range(count):
+        start = float(rng.uniform(now - days * 86400, now - 60))
+        duration = float(rng.uniform(2.0, 12.0))
+        label = labels[rng.integers(0, len(labels))]
+        rows.append({
+            "label":               label,
+            "episode_start_epoch": round(start, 3),
+            "episode_end_epoch":   round(start + duration, 3),
+            "duration_s":          round(duration, 3),
+            "detection_count":     int(rng.integers(2, 10)),
+            "peak_confidence":     round(float(rng.uniform(0.3, 0.9)), 4),
+            "source":              "mock",
+        })
+    df = pd.DataFrame(rows).sort_values("episode_start_epoch").reset_index(drop=True)
+    log.info("Mock episodes: %d generated over %d days", len(df), days)
+    return df
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Entry point
 # ─────────────────────────────────────────────────────────────────────────────
 def main():
     p = argparse.ArgumentParser(description="Indoor Asthma Trigger — ML Predictor")
-    p.add_argument("--config",   default=None, help="Path to predictor_config.json")
-    p.add_argument("--dry-run",  action="store_true",
+    p.add_argument("--config",        default=None, help="Path to predictor_config.json")
+    p.add_argument("--dry-run",       action="store_true",
                    help="Print prediction without writing to Firebase")
+    p.add_argument("--mock-sensors",   action="store_true",
+                   help="Use generated mock sensor data instead of Firebase sensor_readings")
+    p.add_argument("--mock-episodes",  action="store_true",
+                   help="Supplement real Firebase episodes with generated mock episodes")
     args = p.parse_args()
 
     cfg = Config.from_file(args.config) if args.config else Config()
@@ -634,8 +683,22 @@ def main():
     server = PredictionServer(cfg)
 
     if args.dry_run:
-        log.info("--- DRY RUN: single cycle only ---")
-        sensors, episodes = server._pull_all_history()
+        tags = " ".join(filter(None, [
+            "mock sensors" if args.mock_sensors else "",
+            "mock episodes" if args.mock_episodes else "",
+        ]))
+        log.info("--- DRY RUN%s ---", f" ({tags})" if tags else "")
+
+        if args.mock_sensors:
+            sensors = generate_mock_sensors(days=cfg.min_days_data + 1)
+            episodes = server.firebase.get_episodes()
+        else:
+            sensors, episodes = server._pull_all_history()
+
+        if args.mock_episodes:
+            mock_ep = generate_mock_episodes(days=cfg.min_days_data + 1)
+            episodes = pd.concat([episodes, mock_ep], ignore_index=True)
+
         ready, reason = server.gate.check(sensors, episodes)
         log.info("Gate: %s — %s", "READY" if ready else "NOT READY", reason)
         if ready:
